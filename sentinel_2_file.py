@@ -14,6 +14,7 @@ from snappy import GPF, Mask
 import json
 import rasterio.features
 import shapely.geometry
+from PIL import Image
 
 jpy = snappy.jpy
 
@@ -30,20 +31,22 @@ class sentinel2_msi_file(object):
         self.name = self.product.getName()
         self.description = self.product.getDescription()
         self.band_names = self.product.getBandNames()
-        print self.band_names
         self.chunk_size = chunk_size
         self.chunks = self.define_tiles(self.width, self.height)
         self.ten_m_bands = ['B2', 'B3', 'B4', 'B8']
         self.twenty_m_bands = ['B5', 'B6', 'B7', 'B8A', 'B11', 'B12']
         self.sixty_m_bands = ['B1', 'B9', 'B10']
         self.tile = None
+        self.true_chunk_def = [0,0]
         self.current_tile = None
         self.tile_north = None
         self.tile_south = None
         self.tile_east = None
         self.tile_west = None
         self.tile_water = False
+        print "reading as rgb image"
         self.make_rgb_data()
+        self.resamp_geocode = None
         self.do_resample()
         self.do_idepix()
         self.json = {"labels" : [], "complete": None}
@@ -148,15 +151,36 @@ class sentinel2_msi_file(object):
     def generate_snappy_rgb_tile(self, output_location):
         chunk = self.chunks[self.current_tile]
         print self.rgb_image
-        tile = self.rgb_image.getSubimage(chunk[0][0], chunk[1][0], self.chunk_size, self.chunk_size)
+        try:
+            tile = self.rgb_image.getSubimage(chunk[0][0], chunk[1][0], self.chunk_size, self.chunk_size)
+            self.true_chunk_def = [self.chunk_size, self.chunk_size]
+        except:
+            if chunk[0][0] + self.chunk_size >= self.width:
+                self.true_chunk_def[0] = self.width - chunk[0][0]
+            if chunk[1][0] + self.chunk_size >= self.height:
+                self.true_chunk_def[1] = self.height - chunk[0][0]
+            try:
+                tile = self.rgb_image.getSubimage(chunk[0][0], chunk[1][0], self.true_chunk_def[0], self.true_chunk_def[1])
+            except:
+                print chunk[0][0], chunk[1][0], self.true_chunk_def[0], self.true_chunk_def[1]
+                print self.width, self.height
+                #can't do any thing more
+                return True
         RenderedImage = jpy.get_type('java.awt.image.RenderedImage')
         rendered_rgb_image = jpy.cast(tile, RenderedImage)
         File = jpy.get_type('java.io.File')
         oname = File(output_location)
         imageio = jpy.get_type('javax.imageio.ImageIO')
-        imageio.write(rendered_rgb_image, "jpg", oname)
+        imageio.write(rendered_rgb_image, "png", oname)
+        self.convert_rgb_to_jpg(output_location)
         self.make_tile_mask_json(output_location)
-    
+        self.make_text_definitions(output_location)
+
+    def convert_rgb_to_jpg(self, png_file):
+        im = Image.open(png_file)
+        rgb_im = im.convert('RGB')
+        rgb_im.save(png_file.replace(".png", ".jpg"))
+
     def do_resample(self):
         HashMap = snappy.jpy.get_type('java.util.HashMap')
         snappy.GPF.getDefaultInstance().getOperatorSpiRegistry().loadOperatorSpis()
@@ -164,6 +188,7 @@ class sentinel2_msi_file(object):
         self.parameters.put('paramName',False)
         self.parameters.put('targetResolution',10)
         result = snappy.GPF.createProduct('Resample', self.parameters, self.product)
+        self.resamp_geocode = result.getBand("B3").getGeoCoding()
         self.resamp = result
         
     def do_idepix(self):
@@ -174,13 +199,36 @@ class sentinel2_msi_file(object):
         real_mask = jpy.cast(mask, Mask)
         mask_arr = numpy.zeros((self.chunk_size, self.chunk_size))
         chunk = self.chunks[self.current_tile]
-        real_mask.readPixels(chunk[0][0], chunk[1][0], self.chunk_size, self.chunk_size, mask_arr)
+        real_mask.readPixels(chunk[0][0], chunk[1][0], self.true_chunk_def[0], self.true_chunk_def[1], mask_arr)
         mask_one_arr = mask_arr
         mask_one_arr[mask_one_arr > 1] = 1
         mask_one_arr = mask_one_arr.astype(numpy.int16)
         shapes = rasterio.features.shapes(mask_one_arr)
         polygons = [shapely.geometry.Polygon(shape[0]["coordinates"][0]) for shape in shapes if shape[1] == 1]
         return polygons
+    
+    def make_text_definitions(self, output_location):
+        chunk = self.chunks[self.current_tile]
+        nwpp = snappy.PixelPos(chunk[0][0], chunk[1][0])
+        sepp = snappy.PixelPos(chunk[0][0] +self.true_chunk_def[0], chunk[1][0] +self.true_chunk_def[1])
+        nwgp = self.resamp_geocode.getGeoPos(nwpp, None)
+        segp = self.resamp_geocode.getGeoPos(sepp, None)
+        bounds = {}
+        bounds["pixel"] = {}
+        bounds["pixel"]["north"] = chunk[0][0]
+        bounds["pixel"]["south"] = chunk[0][0] + self.true_chunk_def[1]
+        bounds["pixel"]["east"] = chunk[1][0] + self.true_chunk_def[0]
+        bounds["pixel"]["west"] = chunk[1][0]
+        bounds["latlon"] = {}
+        bounds["latlon"]["north"] = nwgp.getLat()
+        bounds["latlon"]["south"] = segp.getLat() 
+        bounds["latlon"]["east"] = segp.getLon()
+        bounds["latlon"]["west"] = nwgp.getLon()
+        print "outputting bounds"
+        with open(os.path.join(output_location.replace(".png", "_bounds.json")), "w") as output:
+            json.dump(bounds, output)
+        return True
+
 
     def make_tile_mask_json(self, output_location):
         labels = []
@@ -209,7 +257,7 @@ class sentinel2_msi_file(object):
                 object_id += 1
 
         json_output['labels'] = labels
-        with open(os.path.join(output_location.replace(".jpg", "__labels_new.json")), "w") as output:
+        with open(os.path.join(output_location.replace(".png", "__labels_new.json")), "w") as output:
             json.dump(json_output, output)
         
 
@@ -255,8 +303,8 @@ class sentinel2_msi_file(object):
             """
         return atm_file
 
-    def create_rgb_for_all_tiles(self, output_location, r='B4', g='B3', b='B2', test_water=True):
-        out_file_name = self.source_filename + "_tile_{}.jpg"
+    def create_rgb_for_all_tiles(self, output_location, r='B4', g='B3', b='B2', test_water=False):
+        out_file_name = self.source_filename + "_tile_{}.png"
         for tile in range(0, len(self.chunks)):
             tile_name = out_file_name.format(tile)
             self.tile_name = tile_name
