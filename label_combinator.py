@@ -124,8 +124,8 @@ def fix_polygons(label_file):
 def dimensioniser(low, high):
     e = high
     w = low
-    perc = (((e - w) / 256) % 1)
-    change = (256 - (256 * perc)) / 2
+    perc = (((e - w) / 500) % 1)
+    change = (500 - (500 * perc)) / 2
     east_change = change
     west_change = change
     dim_error = False
@@ -148,12 +148,12 @@ def dimensioniser(low, high):
             west_change = change
         east = (e + east_change)
         west = (w - west_change)
-        no_of_tiles = (east - west) / 256
+        no_of_tiles = (east - west) / 500
     except:
         west = 0
         east = 2000
         dim_error = True
-        no_of_tiles = (2000 / 256) + 1
+        no_of_tiles = (2000 / 500) + 1
     return  west, east, dim_error, no_of_tiles
 
 def tileifier(polygon,poly_type):
@@ -165,29 +165,26 @@ def tileifier(polygon,poly_type):
     for updown in range(1, int(no_of_tiles_ns)):
         for leftright in range(1, int(no_of_tiles_we)):
             if not leftright == no_of_tiles_we:
-                l = ((west - 256) + (256 * leftright))
-                r = (west + (256 * leftright))
+                l = ((west - 500) + (500 * leftright))
+                r = (west + (500 * leftright))
             elif not dim_error_we:
-                l = ((west - 256) + (256 * leftright))
-                r = (west + (256 * leftright))
+                l = ((west - 500) + (500 * leftright))
+                r = (west + (500 * leftright))
             else:
-                l = (east - 256)
+                l = (east - 500)
                 r = (east)
             if not updown == no_of_tiles_ns:
-                u = ((north - 256) + (256 * updown))
-                d = (north + (256 * updown))
+                u = ((north - 500) + (500 * updown))
+                d = (north + (500 * updown))
             elif not dim_error_ns:
-                u = ((north - 256) + (256 * updown))
-                d = (north + (256 * updown))   
+                u = ((north - 500) + (500 * updown))
+                d = (north + (500 * updown))   
             else:
-                u = (south - 256)
+                u = (south - 500)
                 d = (south)
             tile = [(u, l), (u, r), (d,r), (d,l)]
             true_tile = [l, u, r, d]
             tile_poly = shapely.geometry.MultiPoint([shapely.geometry.Point(x) for x in tile]).convex_hull
-            print poly_type
-            print tile_poly.intersection(polygon).area
-            print (tile_poly.intersection(polygon).area/tile_poly.area)*100
             intersect = (tile_poly.intersection(polygon).area/tile_poly.area)*100
             inter_min = 0
             inter_max = 101
@@ -204,10 +201,8 @@ def tileifier(polygon,poly_type):
             if poly_type == 'cloud':
                 inter_min = 70
 
-            print intersect > inter_min and intersect < inter_max
             if intersect > inter_min and intersect < inter_max:
-                print "appending"
-                tiles.append(true_tile)
+                tiles.append((true_tile, tile_poly.intersection(polygon)))
     return tiles
 
 def image_slicer(image_file, output_location):
@@ -217,18 +212,41 @@ def image_slicer(image_file, output_location):
         labels_json = json.load(jfile)
     image = Image.open(image_file)
     labels = [x for x in labels_json['labels']]
+    super_json = []
     for label in labels:
         polygon_coords = [shapely.geometry.Point(x['x'],x['y']) for x in label['vertices']]
         polygon = shapely.geometry.MultiPoint(polygon_coords).convex_hull
         image_tiles = tileifier(polygon, label['label_class'])
         for index, tile in enumerate(image_tiles):
-            image_tile = image.crop(tile)
+            image_tile = image.crop(tile[0])
             image_tile.save(os.path.join(output_location, os.path.basename(image_file.replace(".png", "_id{}_{}_{}.png".format(label['object_id'], label['label_class'], index+1)))))
+            super_json.append({
+                    "area" : tile[1].area,
+                    "segmentations" : {
+                    "category" : label["label_class"],
+                    "segmentation" : [(x[0] - tile[0][1], x[1] - tile[0][0]) for x in numpy.array(tile[1].exterior)],
+                    "bbox" : [a - b for a, b in zip(tile[1].bounds, [tile[0][1], tile[0][0],tile[0][1],tile[0][0]])],
+                    }
+                    "image_id" : os.path.basename(image_file.replace(".png", "_id{}_{}_{}.png".format(label['object_id'], label['label_class'], index+1))),
+                    "true_bounds" : tile[0]
+            })
+    return super_json
+
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='create some sentinel subtiles')
     parser.add_argument('output', help="output location")
     parser.add_argument('filename', help="sentinel image tile png")
     args = parser.parse_args()
-    image_slicer(args.filename, args.output)
+    if os.path.exists(os.path.join(args.output, "mega_json.json")):
+        with open(os.path.join(args.output, "mega_json.json")) as jfile:
+            mega_json = json.load(jfile)
+    else:
+        mega_json = {"annotations" : []}
+    new_json = image_slicer(args.filename, args.output)
+    mega_json["annotations"].extend(new_json)
+    for index, annotation in enumerate(mega_json["annotations"]):
+        mega_json["annotations"][index]["id"] = index
+    with open(os.path.join(args.output, "mega_json.json"), "w") as output:
+        json.dump(mega_json, output)
 
