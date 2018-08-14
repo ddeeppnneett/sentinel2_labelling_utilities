@@ -221,7 +221,12 @@ def image_slicer(arguments):
     segmentations = []
     for index, tile in enumerate(image_tiles):
         skip=False
-        tile_coords = [[tile[0], tile[1]],[tile[2], tile[1]],[tile[2], tile[3]], [tile[0], tile[3]]]
+        image_tile = image.crop(tile)
+        true_image_tile = image_tile.getbbox()
+        if not true_image_tile:
+            print "empty,skipping"
+            continue
+        tile_coords = [[true_image_tile[0], true_image_tile[1]],[true_image_tile[2], true_image_tile[1]],[true_image_tile[2], true_image_tile[3]], [true_image_tile[0], true_image_tile[3]]]
         tile_poly = shapely.geometry.MultiPoint([shapely.geometry.Point(x) for x in tile_coords]).convex_hull
         for label in labels:
             polygon_coords = [shapely.geometry.Point(x['x'],x['y']) for x in label['vertices']]
@@ -239,6 +244,7 @@ def image_slicer(arguments):
             elif intersect.area > 30:
                 if label["label_class"] == "land":
                     if (tile_poly.intersection(polygon).area/tile_poly.area)*100 > 80:
+                        print "all_land"
                         #we don't want this much land, so we can skip this image
                         skip = True
                         break
@@ -258,10 +264,6 @@ def image_slicer(arguments):
                 print [a - b for a, b in zip(intersect.bounds, [tile[0], tile[1], tile[0], tile[1]])]
                 """
         if len(segmentations) and not skip:
-            image_tile = image.crop(tile)
-            if not image_tile.getbbox():
-                print "empty,skipping"
-                continue
             image_tile.save(os.path.join(output_location, os.path.basename(image_file.replace(".png", "_id{}.png".format(index+1)))))
             tile_json = {
                     "segmentations" : segmentations,
