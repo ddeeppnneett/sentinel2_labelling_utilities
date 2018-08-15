@@ -15,10 +15,16 @@ import json
 import rasterio.features
 import shapely.geometry
 from PIL import Image
+import polymer
+import polymer.level2
+import polymer.ancillary
+import polymer.level1
+import polymer.main
+
 
 jpy = snappy.jpy
 
-masks = ['lc_cloud', 'lc_cloud_sure', 'lc_cloud_buffer', 'lc_cloud_shadow', 'lc_cirrus_sure', 'lc_cirrus_ambiguous', 'lc_clear_land', 'lc_clear_water', 'lc_land', 'lc_water']
+masks = ['lc_cloud', 'lc_cloud_sure', 'lc_cloud_buffer', 'lc_cloud_shadow', 'lc_cirrus_sure', 'lc_cirrus_ambiguous', 'lc_clear_land', 'lc_clear_water']
 
 class sentinel2_msi_file(object):
     def __init__(self,sentinel_2_file_path, chunk_size=2000):
@@ -26,6 +32,8 @@ class sentinel2_msi_file(object):
         self.source_filename = os.path.basename(sentinel_2_file_path)
         print self.source_filename
         self.product = ProductIO.readProduct(sentinel_2_file_path)
+        self.atm_product = None
+        self.atm_band_names=None
         self.width = self.product.getSceneRasterWidth()
         self.height = self.product.getSceneRasterHeight()
         self.name = self.product.getName()
@@ -49,11 +57,14 @@ class sentinel2_msi_file(object):
         self.resamp_geocode = None
         self.do_resample()
         self.do_idepix()
+        print "doing atm corr"
+        self.get_atm_corr_file()
+        self.atm
         self.json = {"labels" : [], "complete": None}
         print "done"
     
     def get_correct_sizes(self, band_name, x, y):
-        if band_name in self.ten_m_bands:
+        if band_name in self.ten_m_bands or band_name == None:
             chunk_size = self.chunk_size
             x = x
             y = y
@@ -75,6 +86,14 @@ class sentinel2_msi_file(object):
         for band_name in band_names:
             chunk_size, startx, starty = self.get_correct_sizes(band_name, x, y)
             band = self.product.getBand(band_name)
+            band_array = numpy.zeros((chunk_size, chunk_size), dtype=numpy.float32)
+            band.readPixels(startx,starty,chunk_size,chunk_size,band_array)
+            bands[band_name] = band_array
+        
+        atm_band_names = [band for band in self.atm_band_names if band.startswith('R') or band.startswith('log')]
+        for band_name in atm_band_names:
+            chunk_size, startx, starty = self.get_correct_sizes(None, x, y)
+            band = self.atm_product.getBand(band_name)
             band_array = numpy.zeros((chunk_size, chunk_size), dtype=numpy.float32)
             band.readPixels(startx,starty,chunk_size,chunk_size,band_array)
             bands[band_name] = band_array
@@ -175,6 +194,12 @@ class sentinel2_msi_file(object):
         self.convert_rgb_to_jpg(output_location)
         self.make_tile_mask_json(output_location)
         self.make_text_definitions(output_location)
+        self.make_spectral_pickle(output_location)
+
+    def make_spectral_pickle(self, output_location):
+        oname = output_location.replace("png", "spkl")
+        with open(oname, "w") as ofile:
+            pickle.dump(self.tile, ofile)
 
     def convert_rgb_to_jpg(self, png_file):
         im = Image.open(png_file)
@@ -269,26 +294,22 @@ class sentinel2_msi_file(object):
         if "land" in mask:
             return "land"
 
-    
-    def get_atm_corr_file(self, atm_corr_storage="/local1/data/scratch/sen2_atm_corr", ancillary_dir="/data/datasets/operational/ancillary/obpg/live_mirror/Meteorological/"):
+    def get_atm_corr_file(self, atm_corr_storage="/data/gfs03/scratch/stgo/atm_corrected_sen2", ancillary_dir="/data/datasets/operational/ancillary/obpg/live_mirror/Meteorological/"):
         print self.source_filename
         print self.full_path
-        self.granule_name = glob.glob(os.path.join(self.full_path, "GRANULE", "*"))[0]
         atm_file = os.path.join(atm_corr_storage, self.source_filename + "_atm.nc")
         print atm_file
         if not os.path.isfile(atm_file):
             self.ancillary = polymer.ancillary.Ancillary_NASA(directory=ancillary_dir, 
                                                          offline=True)
-            self.lev1 = polymer.level1.Level1(self.granule_name,
+            self.lev1 = polymer.level1.Level1(self.full_path,
                                          sensor="msi",
                                          ancillary=self.ancillary)
-            self.lev2 = polymer.level2.Level2(filename="/tmp/poo.nc",
+            self.lev2 = polymer.level2.Level2(filename=atm_file,
                                          fmt="netcdf4",
                                          datasets=polymer.level2.default_datasets.extend(polymer.level2.analysis_datasets))
-            """
-            print "self"
-            print lev2
-            run_atm_corr(lev1,
+
+            polymer.main.run_atm_corr(lev1,
                         lev2,
                         initial_point_1=[0,0],
                         BITMASK_INVALID=4+512,
@@ -299,8 +320,17 @@ class sentinel2_msi_file(object):
                         reinit_rw_neg= 1,
                         water_model="PR05",
                         BITMASK_REJECT=0,
+                        bands_rw=[443,490,560,665,705,740,783,842,865,945,1375,1610,2190]
                         )
-            """
+
+            atm_product = ProductIO.readProduct(atm_file)
+            parameters = HashMap()
+            parameters.put('targetWidth', 10580)
+            parameters.put('targetHeight', 10580)
+            self.atm_resampled_product = GPF.createProduct('Resample', parameters, atm_product)
+            self.atm_band_names = self.atm_resampled_product.getBandNames()
+                   
+
         return atm_file
 
     def create_rgb_for_all_tiles(self, output_location, r='B4', g='B3', b='B2', test_water=False):
