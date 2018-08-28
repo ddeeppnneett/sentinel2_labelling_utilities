@@ -24,6 +24,10 @@ from itertools import product
 import cPickle as pickle
 import netCDF4 as nc
 
+"""
+At some point this should be extended further to push all the json/polygons and rgb data into a single netcdf for distribution purposes.
+"""
+
 def fix_polygons(label_file):
     """
     Combines manual and automatically generated labels into one big file, with simplified overlapping polygons.
