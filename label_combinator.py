@@ -21,6 +21,8 @@ import sys
 import threading
 import multiprocessing
 from itertools import product
+import cPickle as pickle
+import netCDF4 as nc
 
 def fix_polygons(label_file):
     try:
@@ -127,8 +129,8 @@ def fix_polygons(label_file):
 def dimensioniser(low, high):
     e = high
     w = low
-    perc = (((e - w) / 300) % 1)
-    change = (300 - (300 * perc)) / 2
+    perc = (((e - w) / 400) % 1)
+    change = (400 - (400 * perc)) / 2
     east_change = change
     west_change = change
     dim_error = False
@@ -151,12 +153,12 @@ def dimensioniser(low, high):
             west_change = change
         east = (e + east_change)
         west = (w - west_change)
-        no_of_tiles = (east - west) / 300
+        no_of_tiles = (east - west) / 400
     except:
         west = 0
         east = 2000
         dim_error = True
-        no_of_tiles = (2000 / 300) + 1
+        no_of_tiles = (2000 / 400) + 1
     return  west, east, dim_error, no_of_tiles
 
 def tileifier(polygon,poly_type):
@@ -168,22 +170,22 @@ def tileifier(polygon,poly_type):
     for updown in range(1, int(no_of_tiles_ns)):
         for leftright in range(1, int(no_of_tiles_we)):
             if not leftright == no_of_tiles_we:
-                l = ((west - 300) + (300 * leftright))
-                r = (west + (300 * leftright))
+                l = ((west - 400) + (400 * leftright))
+                r = (west + (400 * leftright))
             elif not dim_error_we:
-                l = ((west - 300) + (300 * leftright))
-                r = (west + (300 * leftright))
+                l = ((west - 400) + (400 * leftright))
+                r = (west + (400 * leftright))
             else:
-                l = (east - 300)
+                l = (east - 400)
                 r = (east)
             if not updown == no_of_tiles_ns:
-                u = ((north - 300) + (300 * updown))
-                d = (north + (300 * updown))
+                u = ((north - 400) + (400 * updown))
+                d = (north + (400 * updown))
             elif not dim_error_ns:
-                u = ((north - 300) + (300 * updown))
-                d = (north + (300 * updown))   
+                u = ((north - 400) + (400 * updown))
+                d = (north + (400 * updown))   
             else:
-                u = (south - 300)
+                u = (south - 400)
                 d = (south)
             tile = [(u, l), (u, r), (d,r), (d,l)]
             true_tile = [l, u, r, d]
@@ -208,8 +210,47 @@ def tileifier(polygon,poly_type):
                 tiles.append((true_tile, tile_poly.intersection(polygon)))
     return tiles
 
+def make_spectral_nc(spec_data, oname):
+    print "dumping spectral data"
+    shape = spec_data[spec_data.keys()[0]].shape
+    print oname
+    out_file=nc.Dataset(oname,"w", format="NETCDF4")
+
+    out_file.createDimension('lon', shape[0])
+    out_file.createDimension('lat', shape[1])
+    longitude = out_file.createVariable('Longitude', 'f4', 'lon', zlib=True, complevel=9)
+    latitude = out_file.createVariable('Latitude', 'f4', 'lat', zlib=True, complevel=9)
+
+    longitude[:] = range(0, shape[0])
+    latitude[:] = range(0, shape[1])
+
+    for f in spec_data.keys():
+        print f
+        try:
+            temp = out_file.createVariable(f, 'f4', ('lon', 'lat'), zlib=True, complevel=9, least_significant_digit=3)
+        except Exception as e:
+            print e
+            temp = out_file.variables[f]
+        temp[:] = spec_data[f]
+
+    out_file.close()
+
 def image_slicer(arguments):
     image_file, output_location = arguments
+    spectral_data = None
+    print image_file.replace("png","nc")
+    if os.path.exists(image_file.replace("png","nc")):
+        try:
+            nc_file = image_file.replace("png","nc")
+            print "trying to read"
+            ncd = nc.Dataset(nc_file)
+            print nc_file
+            print ncd
+            spectral_data = {ncd.variables[x].name: ncd.variables[x][:] for x in ncd.variables if len(ncd.variables[x].dimensions) == 2}
+        except Exception as e:
+            print e
+            spectral_data = None
+
     fix_polygons(image_file.replace(".png", "__labels.json"))
     image_json = image_file.replace(".png", "__labels_final.json")
     with open(image_json) as jfile:
@@ -217,7 +258,7 @@ def image_slicer(arguments):
     image = Image.open(image_file)
     labels = [x for x in labels_json['labels']]
     super_json = []
-    image_tiles = [[j,i,j+300, i+300] for i in range(0,2000,300) for j in range(0,2000,300)]
+    image_tiles = [[j,i,j+400, i+400] for i in range(0,2000,400) for j in range(0,2000,400)]
     segmentations = []
     for index, tile in enumerate(image_tiles):
         skip=False
@@ -270,12 +311,22 @@ def image_slicer(arguments):
             }
             with open(os.path.join(output_location, os.path.basename(image_file.replace(".png", "_id{}.json".format(index+1)))), "w") as output:
                 json.dump(tile_json, output)
+
+            if spectral_data:
+                sub_spectral_data = {}
+                for band in spectral_data.keys():
+                    if spectral_data[band].shape == (2000,2000):
+                        sub_spectral_data[band] = spectral_data[band][tile[0]:tile[2], tile[1]:tile[3]]
+                oname = os.path.join(output_location, os.path.basename(image_file.replace(".png", "_id{}.nc".format(index+1))))
+                make_spectral_nc(sub_spectral_data, oname)
+                
     return
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='create some sentinel subtiles')
     parser.add_argument('output', help="output location")
     parser.add_argument("image_files_list", help="text file of paths to files")
+    parser.add_argument("--no_thread", action="store_true", help="text file of paths to files")
     args = parser.parse_args()
     print "json"
     if os.path.exists(os.path.join(args.output, "mega_json.json")):
@@ -286,11 +337,14 @@ if __name__ == "__main__":
     print "image"
     image_files_list = list(open(args.image_files_list))
     no = 1
-    threads = []
     images = [x.replace("\n", "") for x in image_files_list]
-    pool = multiprocessing.Pool(4)
     proc_args = [(x, args.output) for x in images]
-    pool.map(image_slicer, proc_args)
+    if not args.no_thread:
+        pool = multiprocessing.Pool(4)
+        pool.map(image_slicer, proc_args)
+    else:
+        for proc in proc_args:
+            image_slicer(proc)
     """
     for image in image_files_list:
         print no

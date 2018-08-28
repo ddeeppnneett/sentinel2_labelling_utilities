@@ -20,6 +20,8 @@ import polymer.level2
 import polymer.ancillary
 import polymer.level1
 import polymer.main
+import cPickle as pickle
+import netCDF4 as nc
 
 
 jpy = snappy.jpy
@@ -52,14 +54,13 @@ class sentinel2_msi_file(object):
         self.tile_east = None
         self.tile_west = None
         self.tile_water = False
+        print "doing atm corr"
+        self.get_atm_corr_file()
         print "reading as rgb image"
         self.make_rgb_data()
         self.resamp_geocode = None
         self.do_resample()
         self.do_idepix()
-        print "doing atm corr"
-        self.get_atm_corr_file()
-        self.atm
         self.json = {"labels" : [], "complete": None}
         print "done"
     
@@ -84,8 +85,8 @@ class sentinel2_msi_file(object):
         bands = {}
         band_names = [band for band in self.band_names if band.startswith('B')]
         for band_name in band_names:
-            chunk_size, startx, starty = self.get_correct_sizes(band_name, x, y)
-            band = self.product.getBand(band_name)
+            chunk_size, startx, starty = self.get_correct_sizes(None, x, y)
+            band = self.resamp.getBand(band_name)
             band_array = numpy.zeros((chunk_size, chunk_size), dtype=numpy.float32)
             band.readPixels(startx,starty,chunk_size,chunk_size,band_array)
             bands[band_name] = band_array
@@ -93,7 +94,7 @@ class sentinel2_msi_file(object):
         atm_band_names = [band for band in self.atm_band_names if band.startswith('R') or band.startswith('log')]
         for band_name in atm_band_names:
             chunk_size, startx, starty = self.get_correct_sizes(None, x, y)
-            band = self.atm_product.getBand(band_name)
+            band = self.atm_resampled_product.getBand(band_name)
             band_array = numpy.zeros((chunk_size, chunk_size), dtype=numpy.float32)
             band.readPixels(startx,starty,chunk_size,chunk_size,band_array)
             bands[band_name] = band_array
@@ -194,12 +195,35 @@ class sentinel2_msi_file(object):
         self.convert_rgb_to_jpg(output_location)
         self.make_tile_mask_json(output_location)
         self.make_text_definitions(output_location)
-        self.make_spectral_pickle(output_location)
+        self.make_spectral_nc(output_location)
 
-    def make_spectral_pickle(self, output_location):
-        oname = output_location.replace("png", "spkl")
-        with open(oname, "w") as ofile:
-            pickle.dump(self.tile, ofile)
+    def make_spectral_nc(self, output_location):
+        print "dumping spectral data"
+        out_file = output_location.replace("png", "nc")
+        spec_data = self.tile
+        shape = spec_data[spec_data.keys()[0]].shape
+        print out_file
+        out_file=nc.Dataset(out_file,"w", format="NETCDF4")
+
+        out_file.createDimension('lon', shape[0])
+        out_file.createDimension('lat', shape[1])
+        longitude = out_file.createVariable('Longitude', 'f4', 'lon', zlib=True, complevel=9)
+        latitude = out_file.createVariable('Latitude', 'f4', 'lat', zlib=True, complevel=9)
+
+        longitude[:] = range(0, shape[0])
+        latitude[:] = range(0, shape[1])
+
+        for f in spec_data.keys():
+            print f
+            try:
+                temp = out_file.createVariable(f, 'f4', ('lon', 'lat'), zlib=True, complevel=9, least_significant_digit=3)
+            except Exception as e:
+                print e
+                temp = out_file.variables[f]
+            temp[:] = spec_data[f]
+
+        out_file.close()
+
 
     def convert_rgb_to_jpg(self, png_file):
         im = Image.open(png_file)
@@ -309,8 +333,8 @@ class sentinel2_msi_file(object):
                                          fmt="netcdf4",
                                          datasets=polymer.level2.default_datasets.extend(polymer.level2.analysis_datasets))
 
-            polymer.main.run_atm_corr(lev1,
-                        lev2,
+            polymer.main.run_atm_corr(self.lev1,
+                        self.lev2,
                         initial_point_1=[0,0],
                         BITMASK_INVALID=4+512,
                         min_abs=0,
@@ -320,15 +344,17 @@ class sentinel2_msi_file(object):
                         reinit_rw_neg= 1,
                         water_model="PR05",
                         BITMASK_REJECT=0,
-                        bands_rw=[443,490,560,665,705,740,783,842,865,945,1375,1610,2190]
+                        bands_rw=[443,490,560,665,705,740,783,842,865,1375,1610,2190]
                         )
 
-            atm_product = ProductIO.readProduct(atm_file)
-            parameters = HashMap()
-            parameters.put('targetWidth', 10580)
-            parameters.put('targetHeight', 10580)
-            self.atm_resampled_product = GPF.createProduct('Resample', parameters, atm_product)
-            self.atm_band_names = self.atm_resampled_product.getBandNames()
+        atm_product = ProductIO.readProduct(atm_file)
+        HashMap = snappy.jpy.get_type('java.util.HashMap')
+        snappy.GPF.getDefaultInstance().getOperatorSpiRegistry().loadOperatorSpis()
+        parameters = HashMap()
+        parameters.put('targetWidth', self.width)
+        parameters.put('targetHeight', self.height)
+        self.atm_resampled_product = GPF.createProduct('Resample', parameters, atm_product)
+        self.atm_band_names = self.atm_resampled_product.getBandNames()
                    
 
         return atm_file
@@ -336,6 +362,7 @@ class sentinel2_msi_file(object):
     def create_rgb_for_all_tiles(self, output_location, r='B4', g='B3', b='B2', test_water=False):
         out_file_name = self.source_filename + "_tile_{}.png"
         for tile in range(0, len(self.chunks)):
+            print "creating tile {}".format(tile)
             tile_name = out_file_name.format(tile)
             self.tile_name = tile_name
             self.json["image_filename"] = self.tile_name
