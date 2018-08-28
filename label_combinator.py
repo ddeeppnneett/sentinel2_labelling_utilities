@@ -25,6 +25,9 @@ import cPickle as pickle
 import netCDF4 as nc
 
 def fix_polygons(label_file):
+    """
+    Combines manual and automatically generated labels into one big file, with simplified overlapping polygons.
+    """
     try:
         with open(label_file) as jfile:
             base_json = json.load(jfile)
@@ -127,6 +130,9 @@ def fix_polygons(label_file):
 
 
 def dimensioniser(low, high):
+    """
+    legacy
+    """
     e = high
     w = low
     perc = (((e - w) / 400) % 1)
@@ -162,6 +168,9 @@ def dimensioniser(low, high):
     return  west, east, dim_error, no_of_tiles
 
 def tileifier(polygon,poly_type):
+    """
+    legacy tester of data intersection.
+    """
     w,n,e,s= polygon.bounds
     north, south, dim_error_ns, no_of_tiles_ns = dimensioniser(n, s)
     west, east, dim_error_we, no_of_tiles_we = dimensioniser(w, e)
@@ -211,6 +220,9 @@ def tileifier(polygon,poly_type):
     return tiles
 
 def make_spectral_nc(spec_data, oname):
+    """
+    Copied from sentinel_2_file and muddled a bit. Outputs a netcdf of a dict.
+    """
     print "dumping spectral data"
     shape = spec_data[spec_data.keys()[0]].shape
     print oname
@@ -236,6 +248,9 @@ def make_spectral_nc(spec_data, oname):
     out_file.close()
 
 def image_slicer(arguments):
+    """
+    Over built driver function, slices tiles up even further so they can be handled by low memory system.
+    """
     image_file, output_location = arguments
     spectral_data = None
     print image_file.replace("png","nc")
